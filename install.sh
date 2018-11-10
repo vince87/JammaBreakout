@@ -46,7 +46,6 @@ chmod +x install.sh
 	
 ##install jammapi menu script
 	printf "\033[1;31m Installo menu x RetroPie \033[0m\n"
-	cd ~/JammaBreakout/
 	cp -r ~/JammaBreakout/file.sh ~/RetroPie/retropiemenu
 	sleep 2
   
