@@ -46,8 +46,8 @@ chmod +x install.sh
 	
 ##install jammapi menu script
 	printf "\033[1;31m Installo menu x RetroPie \033[0m\n"
-	rm ~/RetroPie/retropiemenu/Abilita-Disabilita Breakout.sh
-	cp -r ~/JammaBreakout/script/Abilita-Disabilita Breakout.sh ~/RetroPie/retropiemenu
+	rm ~/RetroPie/retropiemenu/Abilita-Disabilita-Breakout.sh
+	cp -r ~/JammaBreakout/script/Abilita-Disabilita-Breakout.sh ~/RetroPie/retropiemenu
 	sleep 2
   
     
