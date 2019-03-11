@@ -5,6 +5,7 @@
 #########################################################
 
 cd ~
+sudo apt-get upgrade
 sudo apt-get install -y git
 git clone https://github.com/vince87/JammaBreakout.git
 cd ~/JammaBreakout
