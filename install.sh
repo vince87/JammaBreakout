@@ -22,6 +22,7 @@ chmod +x install.sh
 	sudo sh -c "echo '#dtoverlay=pwm-2chan,pin=18,func=2,pin2=19,func2=2' >> /boot/config.txt"
 	sudo sh -c "echo '#disable_audio_dither=1' >> /boot/config.txt"
 	echo "Config.txt modificato!"
+	amixer cset numid=3 "1"
 	fi
 	sleep 2
 
