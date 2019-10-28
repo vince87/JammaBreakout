@@ -47,7 +47,7 @@ chmod +x install.sh
 	if [ $? -eq 0 ] ; then
 	echo "Già modificato!"
 	else
-	sudo sh -c "echo '#mk_arcade_joystick_rpi' >> /etc/modules"
+	sudo sh -c "echo 'mk_arcade_joystick_rpi' >> /etc/modules"
 	echo "Modulo impostato!"
 	fi
 	sleep 2
