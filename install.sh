@@ -4,6 +4,9 @@
 ## Versione 0.5
 #########################################################
 
+dialog --title "Script installazione Jamma Breakout" --msgbox "Attenzione verranno ora installati i driver per il corretto funzionamento della Jamma Breakout.
+\n \nSe stai usando un immagine custom, non scaricata da retropie.org.uk, accertati di aver disattivato tutti gli script che usano i GPIO." 12 60
+
 cd ~
 sudo apt-get update
 sudo apt-get install -y git
@@ -15,14 +18,16 @@ chmod +x install.sh
 
   ##Modify Config.txt to Default
 	printf "\033[1;31m Modifico il config.txt per la JammaBreakout \033[0m\n"
-	sudo grep 'dtoverlay=pwm-2chan,pin=18,func=2,pin2=19,func2=2' /boot/config.txt > /dev/null 2>&1
-	if [ $? -eq 0 ] ; then
-	echo "Config.txt già modificato!"
-	else
-	sudo sh -c "echo '#dtoverlay=pwm-2chan,pin=18,func=2,pin2=19,func2=2' >> /boot/config.txt"
-	sudo sh -c "echo '#disable_audio_dither=1' >> /boot/config.txt"
-	echo "Config.txt modificato!"
+	sudo grep 'Pi 4' /proc/device-tree/model > /dev/null 2>&1 
+		if [ $? -eq 0 ] ; then
+        	sudo sh -c "echo 'dtoverlay=audremap,pins_18_19' >> /boot/config.txt"
+		else
+		sudo sh -c "echo 'dtoverlay=pwm-2chan,pin=18,func=2,pin2=19,func2=2' >> /boot/config.txt"
+		fi
+	sudo sh -c "echo 'audio_pwm_mode=3' >> /boot/config.txt"
+	sudo sh -c "echo 'disable_audio_dither=1' >> /boot/config.txt"
 	amixer cset numid=3 "1"
+	echo "Config.txt modificato!"
 	fi
 	sleep 2
 
