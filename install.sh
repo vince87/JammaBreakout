@@ -9,7 +9,7 @@ dialog --title "Script installazione Jamma Breakout" --msgbox "Attenzione verran
 
 cd ~
 sudo apt-get update
-sudo apt-get install -y git
+sudo apt-get install -y git dialog
 git clone https://github.com/vince87/JammaBreakout.git
 cd ~/JammaBreakout
 git pull
