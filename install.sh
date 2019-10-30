@@ -40,9 +40,9 @@ chmod +x install.sh
 	sudo dkms build -m mk_arcade_joystick_rpi -v 0.1.5
 	sudo dkms install -m mk_arcade_joystick_rpi -v 0.1.5
 	sudo modprobe mk_arcade_joystick_rpi map=1,2
-	sudo rm /etc/modprobe.d/mk_arcade_joystick.conf
-	echo "options mk_arcade_joystick_rpi map=1,2" >> mk_arcade_joystick.conf
-	sudo mv mk_arcade_joystick.conf /etc/modprobe.d/
+	sudo rm /etc/modprobe.d/mk_arcade_joystick_rpi.conf
+	echo "options mk_arcade_joystick_rpi map=1,2" >> mk_arcade_joystick_rpi.conf
+	sudo mv mk_arcade_joystick_rpi.conf /etc/modprobe.d/
 	sudo grep 'mk_arcade_joystick_rpi' /etc/modules > /dev/null 2>&1
 	if [ $? -eq 0 ] ; then
 	echo "Già modificato!"
