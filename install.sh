@@ -28,7 +28,6 @@ chmod +x install.sh
 	sudo sh -c "echo 'disable_audio_dither=1' >> /boot/config.txt"
 	amixer cset numid=3 "1"
 	echo "Config.txt modificato!"
-	fi
 	sleep 2
 
 ##install jammapi joystick driver
