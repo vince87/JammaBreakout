@@ -12,12 +12,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
+ * 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
+ * 
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
@@ -31,28 +31,22 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/input.h>
+#include <linux/of_device.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 
 #include <linux/ioport.h>
-#include <asm/io.h>
 #include <linux/version.h>
+#include <asm/io.h>
+
 
 MODULE_AUTHOR("Matthieu Proucelle");
 MODULE_DESCRIPTION("GPIO and MCP23017 Arcade Joystick Driver");
 MODULE_LICENSE("GPL");
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-#define HAVE_TIMER_SETUP
-#endif
-
 #define MK_MAX_DEVICES		9
 
-#ifdef RPI2
-#define PERI_BASE        0x3F000000
-#else
-#define PERI_BASE        0x20000000
-#endif
+#define PERI_BASE        mk_bcm2708_peri_base
 
 #define GPIO_BASE                (PERI_BASE + 0x200000) /* GPIO controller */
 
@@ -112,8 +106,32 @@ MODULE_LICENSE("GPL");
 
 #define CLEAR_STATUS	BSC_S_CLKT|BSC_S_ERR|BSC_S_DONE
 
+/*
+ * defines for BCM 2711
+ *
+ * refer to "Chapter 5. General Purpose I/O (GPIO)"
+ * in "BCM2711 ARM Peripherals", 2020-02-05
+ */
+#define PUD_2711_MASK           0x3
+#define PUD_2711_REG_OFFSET(p)  ((p) / 16)
+#define PUD_2711_REG_SHIFT(p)   (((p) % 16) * 2)
+
+#define BCM2711_PULL_UP         0x1
+
+/* BCM 2711 has a different mechanism for pin pull-up/down/enable  */
+#define GPIO_PUP_PDN_CNTRL_REG0 57      /* Pin pull-up/down for pins 15:0  */
+#define GPIO_PUP_PDN_CNTRL_REG1 58      /* Pin pull-up/down for pins 31:16 */
+#define GPIO_PUP_PDN_CNTRL_REG2 59      /* Pin pull-up/down for pins 47:32 */
+#define GPIO_PUP_PDN_CNTRL_REG3 60      /* Pin pull-up/down for pins 57:48 */
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#define HAVE_TIMER_SETUP
+#endif
+
 static volatile unsigned *gpio;
 static volatile unsigned *bsc1;
+static int is_2711;
 
 struct mk_config {
     int args[MK_MAX_DEVICES];
@@ -152,7 +170,7 @@ struct mk_pad {
     enum mk_type type;
     char phys[32];
     int mcp23017addr;
-    int gpio_maps[12]
+    int gpio_maps[12];
 };
 
 struct mk_nin_gpio {
@@ -185,18 +203,18 @@ static const int mk_data_size = 16;
 static const int mk_max_arcade_buttons = 12;
 static const int mk_max_mcp_arcade_buttons = 16;
 
-// Map of the gpios :                            up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
-static const int mk_arcade_gpio_maps[] =       { 4,  17,   27,   22,    10,    9,      25, 24, 23, 3, 15, 14 };
-// 2nd joystick on the b+ GPIOS                  up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
-static const int mk_arcade_gpio_maps_bplus[] = { 11, 5,    6,    13,    2,    26,     21, 20, 16, 12, 7,  8  };
+// Map of the gpios :                     up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
+static const int mk_arcade_gpio_maps[] = { 4,  17,    27,  22,    10,    9,      25, 24, 23, 3, 15, 14 };
+// 2nd joystick on the b+ GPIOS                 up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
+static const int mk_arcade_gpio_maps_bplus[] = { 11, 5,    6,    13,    2,    26,     21, 20, 16, 12, 7,  8 };
+// Map of the mcp23017 on GPIOA            up, down, left, right, start, select, a,	 b
+static const int mk_arcade_gpioa_maps[] = { 0,  1,    2,    3,     4,     5,	6,	 7 };
 
-// Map of the mcp23017 on GPIOA                  up, down, left, right, start, select, a,  b
-static const int mk_arcade_gpioa_maps[] =      { 0,  1,    2,    3,     4,     5,      6,  7 };
-// Map of the mcp23017 on GPIOB                  tr, y,    x,    tl,    c,     tr2,    z,  tl2
-static const int mk_arcade_gpiob_maps[] =      { 0,  1,    2,    3,     4,     5,      6,  7 };
+// Map of the mcp23017 on GPIOB            tr, y, x, tl, c, tr2, z, tl2
+static const int mk_arcade_gpiob_maps[] = { 0, 1, 2,  3, 4, 5,   6, 7 };
 
-// Map joystick on the b+ GPIOS with TFT         up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
-static const int mk_arcade_gpio_maps_tft[] =   { 21, 13,   26,   19,    5,     6,      22, 4,  20, 17, 27, 16 };
+// Map joystick on the b+ GPIOS with TFT      up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
+static const int mk_arcade_gpio_maps_tft[] = { 21, 13,    26,    19,    5,    6,     22, 4, 20, 17, 27,  16 };
 
 static const short mk_arcade_gpio_btn[] = {
 	BTN_START, BTN_SELECT, BTN_A, BTN_B, BTN_TR, BTN_Y, BTN_X, BTN_TL, BTN_C, BTN_TR2, BTN_Z, BTN_TL2
@@ -205,6 +223,48 @@ static const short mk_arcade_gpio_btn[] = {
 static const char *mk_names[] = {
     NULL, "GPIO Controller 1", "GPIO Controller 2", "MCP23017 Controller", "GPIO Controller 1" , "GPIO Controller 1"
 };
+
+/* BCM board peripherals address base */
+static u32 mk_bcm2708_peri_base;
+
+/**
+ * mk_bcm_peri_base_probe - Find the peripherals address base for
+ * the running Raspberry Pi model. It needs a kernel with runtime Device-Tree
+ * overlay support.
+ *
+ * Based on the userland 'bcm_host' library code from
+ * https://github.com/raspberrypi/userland/blob/2549c149d8aa7f18ff201a1c0429cb26f9e2535a/host_applications/linux/libs/bcm_host/bcm_host.c#L150
+ *
+ * Reference: https://www.raspberrypi.org/documentation/hardware/raspberrypi/peripheral_addresses.md
+ *
+ * If any error occurs reading the device tree nodes/properties, then return 0.
+ */
+static u32 __init mk_bcm_peri_base_probe(void) {
+
+    char *path = "/soc";
+    struct device_node *dt_node;
+    u32 base_address = 1;
+
+    dt_node = of_find_node_by_path(path);
+    if (!dt_node) {
+        pr_err("failed to find device-tree node: %s\n", path);
+        return 0;
+    }
+
+    if (of_property_read_u32_index(dt_node, "ranges", 1, &base_address)) {
+        pr_err("failed to read range index 1\n");
+        return 0;
+    }
+
+    if (base_address == 0) {
+        if (of_property_read_u32_index(dt_node, "ranges", 2, &base_address)) {
+            pr_err("failed to read range index 2\n");
+            return 0;
+        }
+    }
+
+    return base_address == 1 ? 0x02000000 : base_address;
+}
 
 /* GPIO UTILS */
 static void setGpioPullUps(int pullUps) {
@@ -271,10 +331,10 @@ static void i2c_write(char dev_addr, char reg_addr, char *buf, unsigned short le
 
 static void i2c_read(char dev_addr, char reg_addr, char *buf, unsigned short len) {
 
-    i2c_write(dev_addr, reg_addr, NULL, 0);
-
     unsigned short bufidx;
     bufidx = 0;
+
+    i2c_write(dev_addr, reg_addr, NULL, 0);
 
     memset(buf, 0, len); // clear the buffer
 
@@ -313,6 +373,22 @@ static void mk_mcp23017_read_packet(struct mk_pad * pad, unsigned char *data) {
     for (i = 8; i < 16; i++) {
         data[i] = !((resultB >> (mk_arcade_gpiob_maps[i-8])) & 0x1);
     }
+}
+
+static void set_gpio_pullups_2711(int gpio_map[]) {
+    int i;
+    for (i = 0; i < mk_max_arcade_buttons; i++) {
+        if (gpio_map[i] != -1) {
+            u32 pud_reg = GPIO_PUP_PDN_CNTRL_REG0
+                          + PUD_2711_REG_OFFSET(gpio_map[i]);
+            u32 shift = PUD_2711_REG_SHIFT(gpio_map[i]);
+            u32 val = *(gpio + pud_reg);
+            val &= ~(PUD_2711_MASK << shift);
+            val |= (BCM2711_PULL_UP << shift);
+            *(gpio + pud_reg) = val;
+        }
+    }
+
 }
 
 static void mk_gpio_read_packet(struct mk_pad * pad, unsigned char *data) {
@@ -369,11 +445,8 @@ static void mk_process_packet(struct mk *mk) {
 /*
  * mk_timer() initiates reads of console pads data.
  */
-
-
 #ifdef HAVE_TIMER_SETUP
-static void mk_timer(struct timer_list *t)
-{
+static void mk_timer(struct timer_list *t) {
     struct mk *mk = from_timer(mk, t, timer);
 #else
 static void mk_timer(unsigned long private) {
@@ -434,10 +507,10 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
             pr_err("Custom device needs gpio argument\n");
             return -EINVAL;
         } else if(gpio_cfg.nargs != 12){
-             pr_err("Invalid gpio argument\n", pad_type);
+             pr_err("Invalid gpio argument pad_type=%d\n", pad_type);
              return -EINVAL;
         }
-
+    
     }
 
     pr_err("pad type : %d\n",pad_type);
@@ -468,15 +541,15 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
 
     for (i = 0; i < 2; i++)
         input_set_abs_params(input_dev, ABS_X + i, -1, 1, 0, 0);
-	if (pad_type != MK_ARCADE_MCP23017)
-	{
-		for (i = 0; i < mk_max_arcade_buttons; i++)
+
+    if (pad_type != MK_ARCADE_MCP23017)
+    {
+	for (i = 0; i < mk_max_arcade_buttons - 4; i++)
 			__set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
-	}
-	else { //Checking for MCP23017 so it gets 4 more buttons registered to it.
-		for (i = 0; i < mk_max_mcp_arcade_buttons; i++)
+    } else { //Checking for MCP23017 so it gets 4 more buttons registered to it.
+		for (i = 0; i < mk_max_mcp_arcade_buttons - 4; i++)
 			__set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
-	}
+    }
 
     mk->pad_count[pad_type]++;
 
@@ -502,13 +575,19 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
     // initialize gpio if not MCP23017, else initialize i2c
     if(pad_type != MK_ARCADE_MCP23017){
         for (i = 0; i < mk_max_arcade_buttons; i++) {
-            printk("GPIO = %d\n", pad->gpio_maps[i]);
+            pr_debug("GPIO = %d\n", pad->gpio_maps[i]);
             if(pad->gpio_maps[i] != -1){    // to avoid unused buttons
                  setGpioAsInput(pad->gpio_maps[i]);
-            }
+            }                
         }
-        setGpioPullUps(getPullUpMask(pad->gpio_maps));
-        printk("GPIO configured for pad%d\n", idx);
+        is_2711 = *(gpio+GPIO_PUP_PDN_CNTRL_REG3) != 0x6770696f;
+        if (is_2711) {
+            set_gpio_pullups_2711(pad->gpio_maps);
+        } else {
+            setGpioPullUps(getPullUpMask(pad->gpio_maps));
+        }
+
+        pr_info("GPIO configured for pad%d\n", idx);
     }else{
         i2c_init();
         udelay(1000);
@@ -525,7 +604,7 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
         i2c_write(pad->mcp23017addr, MPC23017_GPIOB_PULLUPS_MODE, &FF, 1);
         udelay(1000);
         // Put all inputs on MCP23017 in pullup mode a second time
-        // Known bug : if you remove this line, you will not have pullups on GPIOB
+        // Known bug : if you remove this line, you will not have pullups on GPIOB 
         i2c_write(pad->mcp23017addr, MPC23017_GPIOB_PULLUPS_MODE, &FF, 1);
         udelay(1000);
     }
@@ -601,6 +680,16 @@ static void mk_remove(struct mk *mk) {
 }
 
 static int __init mk_init(void) {
+
+    /* Get the BCM2708 peripheral address */
+    mk_bcm2708_peri_base = mk_bcm_peri_base_probe();
+    if (!mk_bcm2708_peri_base) {
+        pr_err("failed to find peripherals address base via device-tree\n");
+        return -ENODEV;
+    }
+
+    pr_info("peripherals address base at 0x%08x\n", mk_bcm2708_peri_base);
+
     /* Set up gpio pointer for direct register access */
     if ((gpio = ioremap(GPIO_BASE, 0xB0)) == NULL) {
         pr_err("io remap failed\n");
