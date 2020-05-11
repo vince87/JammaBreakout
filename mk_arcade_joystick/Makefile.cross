@@ -24,4 +24,3 @@ clean:
 	rm -f *.o *.ko *.mod.c .*.o .*.ko .*.mod.c .*.cmd *~
 	rm -f Module.symvers Module.markers modules.order
 	rm -rf .tmp_versions
-
