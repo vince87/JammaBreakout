@@ -8,8 +8,8 @@ dialog --title "Script installazione Jamma Breakout" --msgbox "Attenzione verran
 \n \nSe stai usando un immagine custom, non scaricata da retropie.org.uk, accertati di aver disattivato tutti gli script che usano i GPIO." 12 60
 
 cd ~
-sudo apt-get update
-sudo apt-get install -y git dialog raspberrypi-bootloader raspberrypi-kernel raspberrypi-kernel-headers
+#sudo apt-get update
+#sudo apt-get install -y git dialog raspberrypi-bootloader raspberrypi-kernel raspberrypi-kernel-headers
 git clone https://github.com/vince87/JammaBreakout.git
 cd ~/JammaBreakout
 git pull
