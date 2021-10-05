@@ -4,6 +4,13 @@
  *  Copyright (c) 2014 Matthieu Proucelle
  *
  *  Based on the gamecon driver by Vojtech Pavlik, and Markus Hiienkari
+ * 
+ *  custom 2 players GPIO from RecalBox Team 2019
+ * 
+ *  Auto base address from cmitu https://github.com/cmitu/gamecon_gpio_rpi/
+ * 
+ *  Pi4 Gpio PullUp/PullDown config from https://github.com/RPi-Distro/raspi-gpio
+ * 
  */
 
 
@@ -31,24 +38,49 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/input.h>
-#include <linux/of_device.h>
 #include <linux/mutex.h>
+#include <linux/of_device.h>
 #include <linux/slab.h>
+#include <linux/unistd.h>
 
 #include <linux/ioport.h>
-#include <linux/version.h>
 #include <asm/io.h>
-
 
 MODULE_AUTHOR("Matthieu Proucelle");
 MODULE_DESCRIPTION("GPIO and MCP23017 Arcade Joystick Driver");
 MODULE_LICENSE("GPL");
 
 #define MK_MAX_DEVICES		9
+#define MK_MAX_BUTTONS      13
 
-#define PERI_BASE        mk_bcm2708_peri_base
+/* Base address detection from cmitu https://github.com/cmitu/gamecon_gpio_rpi/ */
+/* BCM board peripherals address base */
+static uint32_t gc_bcm2708_peri_base;
 
+#define PERI_BASE gc_bcm2708_peri_base
 #define GPIO_BASE                (PERI_BASE + 0x200000) /* GPIO controller */
+#define is_2711 *(gpio+GPPUPPDN3) != 0x6770696f ? true : false 
+
+
+/* for Pi4 - from raspi-gpio.c */
+#define GPIO_BASE_OFFSET  0x00200000
+
+#define PULL_UNSET  -1
+#define PULL_NONE    0
+#define PULL_DOWN    1
+#define PULL_UP      2
+
+#define GPIO_MIN     0
+#define GPIO_MAX     53
+
+#define GPIO_BASE_OFFSET  0x00200000
+
+#define GPPUD     37
+#define GPPUDCLK0 38
+#define GPPUDCLK1 39
+
+#define GPPUPPDN0                57        /* Pin pull-up/down for pins 15:0  */
+#define GPPUPPDN3                60        /* Pin pull-up/down for pins 57:48 */
 
 #define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
 #define OUT_GPIO(g) *(gpio+((g)/10)) |=  (1<<(((g)%10)*3))
@@ -106,32 +138,8 @@ MODULE_LICENSE("GPL");
 
 #define CLEAR_STATUS	BSC_S_CLKT|BSC_S_ERR|BSC_S_DONE
 
-/*
- * defines for BCM 2711
- *
- * refer to "Chapter 5. General Purpose I/O (GPIO)"
- * in "BCM2711 ARM Peripherals", 2020-02-05
- */
-#define PUD_2711_MASK           0x3
-#define PUD_2711_REG_OFFSET(p)  ((p) / 16)
-#define PUD_2711_REG_SHIFT(p)   (((p) % 16) * 2)
-
-#define BCM2711_PULL_UP         0x1
-
-/* BCM 2711 has a different mechanism for pin pull-up/down/enable  */
-#define GPIO_PUP_PDN_CNTRL_REG0 57      /* Pin pull-up/down for pins 15:0  */
-#define GPIO_PUP_PDN_CNTRL_REG1 58      /* Pin pull-up/down for pins 31:16 */
-#define GPIO_PUP_PDN_CNTRL_REG2 59      /* Pin pull-up/down for pins 47:32 */
-#define GPIO_PUP_PDN_CNTRL_REG3 60      /* Pin pull-up/down for pins 57:48 */
-
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-#define HAVE_TIMER_SETUP
-#endif
-
 static volatile unsigned *gpio;
 static volatile unsigned *bsc1;
-static int is_2711;
 
 struct mk_config {
     int args[MK_MAX_DEVICES];
@@ -144,14 +152,21 @@ module_param_array_named(map, mk_cfg.args, int, &(mk_cfg.nargs), 0);
 MODULE_PARM_DESC(map, "Enable or disable GPIO, MCP23017, TFT and Custom Arcade Joystick");
 
 struct gpio_config {
-    int mk_arcade_gpio_maps_custom[12];
+    int mk_arcade_gpio_maps_custom[MK_MAX_BUTTONS];
     unsigned int nargs;
 };
 
+// for player 1 
 static struct gpio_config gpio_cfg __initdata;
 
 module_param_array_named(gpio, gpio_cfg.mk_arcade_gpio_maps_custom, int, &(gpio_cfg.nargs), 0);
-MODULE_PARM_DESC(gpio, "Numbers of custom GPIO for Arcade Joystick");
+MODULE_PARM_DESC(gpio, "Numbers of custom GPIO for Arcade Joystick 1");
+
+// for player 2
+static struct gpio_config gpio_cfg2 __initdata;
+
+module_param_array_named(gpio2, gpio_cfg2.mk_arcade_gpio_maps_custom, int, &(gpio_cfg2.nargs), 0);
+MODULE_PARM_DESC(gpio2, "Numbers of custom GPIO for Arcade Joystick 2");
 
 enum mk_type {
     MK_NONE = 0,
@@ -160,6 +175,7 @@ enum mk_type {
     MK_ARCADE_MCP23017,
     MK_ARCADE_GPIO_TFT,
     MK_ARCADE_GPIO_CUSTOM,
+    MK_ARCADE_GPIO_CUSTOM2,
     MK_MAX
 };
 
@@ -170,7 +186,7 @@ struct mk_pad {
     enum mk_type type;
     char phys[32];
     int mcp23017addr;
-    int gpio_maps[12];
+    int gpio_maps[MK_MAX_BUTTONS];
 };
 
 struct mk_nin_gpio {
@@ -199,8 +215,6 @@ struct mk_subdev {
 static struct mk *mk_base;
 
 static const int mk_data_size = 16;
-
-static const int mk_max_arcade_buttons = 12;
 static const int mk_max_mcp_arcade_buttons = 16;
 
 // Map of the gpios :                     up, down, left, right, start, select, a,  b,  tr, y,  x,  tl
@@ -217,18 +231,78 @@ static const int mk_arcade_gpiob_maps[] = { 0, 1, 2,  3, 4, 5,   6, 7 };
 static const int mk_arcade_gpio_maps_tft[] = { 21, 13,    26,    19,    5,    6,     22, 4, 20, 17, 27,  16 };
 
 static const short mk_arcade_gpio_btn[] = {
-	BTN_START, BTN_SELECT, BTN_A, BTN_B, BTN_TR, BTN_Y, BTN_X, BTN_TL, BTN_C, BTN_TR2, BTN_Z, BTN_TL2
+	BTN_START, BTN_SELECT, BTN_A, BTN_B, BTN_TR, BTN_Y, BTN_X, BTN_TL, BTN_MODE, BTN_TR2, BTN_Z, BTN_TL2
 };
 
 static const char *mk_names[] = {
-    NULL, "GPIO Controller 1", "GPIO Controller 2", "MCP23017 Controller", "GPIO Controller 1" , "GPIO Controller 1"
+    NULL, "GPIO Controller 1", "GPIO Controller 2", "MCP23017 Controller", "GPIO TFT Controller 1" , "GPIO Custom Controller 1", "GPIO Custom Controller 2"
 };
 
-/* BCM board peripherals address base */
-static u32 mk_bcm2708_peri_base;
+/* For Pi 4 - from raspi gpio.c */
 
-/**
- * mk_bcm_peri_base_probe - Find the peripherals address base for
+/*
+ * type:
+ *   0 = no pull
+ *   1 = pull down
+ *   2 = pull up
+ */
+int gpio_set_pull(int gpiopin, int type)
+{
+	
+    if (gpiopin < GPIO_MIN || gpiopin > GPIO_MAX) return -1;
+    if (type < 0 || type > 2) return -1;
+
+    if (is_2711)
+    {
+        int pullreg = GPPUPPDN0 + (gpiopin>>4);
+        int pullshift = (gpiopin & 0xf) << 1;
+        unsigned int pullbits;
+        unsigned int pull;
+
+        switch (type)
+        {
+        case PULL_NONE:
+            pull = 0;
+            break;
+        case PULL_UP:
+            pull = 1;
+            break;
+        case PULL_DOWN:
+            pull = 2;
+            break;
+        default:
+            return 1; /* An illegal value */
+        }
+
+        pullbits = *(gpio + pullreg);
+        pullbits &= ~(3 << pullshift);
+        pullbits |= (pull << pullshift);
+        *(gpio + pullreg) = pullbits;
+    }
+    else
+    {
+        int clkreg = GPPUDCLK0 + (gpiopin>>5);
+        int clkbit = 1 << (gpiopin & 0x1f);
+
+        *(gpio + GPPUD) = type;
+        udelay(10);
+        *(gpio + clkreg) = clkbit;
+        udelay(10);
+        *(gpio + GPPUD) = 0;
+        udelay(10);
+        *(gpio + clkreg) = 0;
+        udelay(10);
+    }
+
+    return 0;
+}
+
+/* ------------------------------*/
+
+
+
+/*
+ * gc_bcm_peri_base_probe - Find the peripherals address base for
  * the running Raspberry Pi model. It needs a kernel with runtime Device-Tree
  * overlay support.
  *
@@ -239,32 +313,34 @@ static u32 mk_bcm2708_peri_base;
  *
  * If any error occurs reading the device tree nodes/properties, then return 0.
  */
-static u32 __init mk_bcm_peri_base_probe(void) {
+static u32 __init gc_bcm_peri_base_probe(void) {
 
-    char *path = "/soc";
-    struct device_node *dt_node;
-    u32 base_address = 1;
+	char *path = "/soc";
+	struct device_node *dt_node;
+	u32 base_address = 1;
 
-    dt_node = of_find_node_by_path(path);
-    if (!dt_node) {
-        pr_err("failed to find device-tree node: %s\n", path);
-        return 0;
-    }
+	dt_node = of_find_node_by_path(path);
+	if (!dt_node) {
+		pr_err("failed to find device-tree node: %s\n", path);
+		return 0;
+	}
 
-    if (of_property_read_u32_index(dt_node, "ranges", 1, &base_address)) {
-        pr_err("failed to read range index 1\n");
-        return 0;
-    }
+	if (of_property_read_u32_index(dt_node, "ranges", 1, &base_address)) {
+		pr_err("failed to read range index 1\n");
+		return 0;
+	}
 
-    if (base_address == 0) {
-        if (of_property_read_u32_index(dt_node, "ranges", 2, &base_address)) {
-            pr_err("failed to read range index 2\n");
-            return 0;
-        }
-    }
+	if (base_address == 0) {
+		if (of_property_read_u32_index(dt_node, "ranges", 2, &base_address)) {
+			pr_err("failed to read range index 2\n");
+			return 0;
+		}
+	}
 
-    return base_address == 1 ? 0x02000000 : base_address;
+	return base_address == 1 ? 0x02000000 : base_address;
 }
+
+
 
 /* GPIO UTILS */
 static void setGpioPullUps(int pullUps) {
@@ -283,7 +359,7 @@ static void setGpioAsInput(int gpioNum) {
 static int getPullUpMask(int gpioMap[]){
     int mask = 0x0000000;
     int i;
-    for(i=0; i<12;i++) {
+    for(i=0; i<MK_MAX_BUTTONS;i++) {
         if(gpioMap[i] != -1){   // to avoid unused pins
             int pin_mask  = 1<<gpioMap[i];
             mask = mask | pin_mask;
@@ -331,8 +407,7 @@ static void i2c_write(char dev_addr, char reg_addr, char *buf, unsigned short le
 
 static void i2c_read(char dev_addr, char reg_addr, char *buf, unsigned short len) {
 
-    unsigned short bufidx;
-    bufidx = 0;
+    unsigned short bufidx = 0;
 
     i2c_write(dev_addr, reg_addr, NULL, 0);
 
@@ -375,26 +450,10 @@ static void mk_mcp23017_read_packet(struct mk_pad * pad, unsigned char *data) {
     }
 }
 
-static void set_gpio_pullups_2711(int gpio_map[]) {
-    int i;
-    for (i = 0; i < mk_max_arcade_buttons; i++) {
-        if (gpio_map[i] != -1) {
-            u32 pud_reg = GPIO_PUP_PDN_CNTRL_REG0
-                          + PUD_2711_REG_OFFSET(gpio_map[i]);
-            u32 shift = PUD_2711_REG_SHIFT(gpio_map[i]);
-            u32 val = *(gpio + pud_reg);
-            val &= ~(PUD_2711_MASK << shift);
-            val |= (BCM2711_PULL_UP << shift);
-            *(gpio + pud_reg) = val;
-        }
-    }
-
-}
-
 static void mk_gpio_read_packet(struct mk_pad * pad, unsigned char *data) {
     int i;
 
-    for (i = 0; i < mk_max_arcade_buttons; i++) {
+    for (i = 0; i < MK_MAX_BUTTONS; i++) {
         if(pad->gpio_maps[i] != -1){    // to avoid unused buttons
             int read = GPIO_READ(pad->gpio_maps[i]);
             if (read == 0) data[i] = 1;
@@ -415,7 +474,7 @@ static void mk_input_report(struct mk_pad * pad, unsigned char * data) {
 		}
 	}
 	else {
-		for (j = 4; j < mk_max_arcade_buttons; j++) {
+		for (j = 4; j < MK_MAX_BUTTONS; j++) {
 			input_report_key(dev, mk_arcade_gpio_btn[j - 4], data[j]);
 		}
 	}
@@ -430,7 +489,7 @@ static void mk_process_packet(struct mk *mk) {
 
     for (i = 0; i < MK_MAX_DEVICES; i++) {
         pad = &mk->pads[i];
-        if (pad->type == MK_ARCADE_GPIO || pad->type == MK_ARCADE_GPIO_BPLUS || pad->type == MK_ARCADE_GPIO_TFT || pad->type == MK_ARCADE_GPIO_CUSTOM) {
+        if (pad->type == MK_ARCADE_GPIO || pad->type == MK_ARCADE_GPIO_BPLUS || pad->type == MK_ARCADE_GPIO_TFT || pad->type == MK_ARCADE_GPIO_CUSTOM || pad->type == MK_ARCADE_GPIO_CUSTOM2) {
             mk_gpio_read_packet(pad, data);
             mk_input_report(pad, data);
         }
@@ -445,13 +504,9 @@ static void mk_process_packet(struct mk *mk) {
 /*
  * mk_timer() initiates reads of console pads data.
  */
-#ifdef HAVE_TIMER_SETUP
+
 static void mk_timer(struct timer_list *t) {
-    struct mk *mk = from_timer(mk, t, timer);
-#else
-static void mk_timer(unsigned long private) {
-    struct mk *mk = (void *) private;
-#endif
+	struct mk *mk = from_timer(mk, t, timer);
     mk_process_packet(mk);
     mod_timer(&mk->timer, jiffies + MK_REFRESH_TIME);
 }
@@ -506,11 +561,24 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
         if (gpio_cfg.nargs < 1) {
             pr_err("Custom device needs gpio argument\n");
             return -EINVAL;
-        } else if(gpio_cfg.nargs != 12){
-             pr_err("Invalid gpio argument pad_type=%d\n", pad_type);
+        } else if(gpio_cfg.nargs != MK_MAX_BUTTONS){
+             pr_err("Invalid gpio argument %d\n", pad_type);
              return -EINVAL;
         }
-    
+
+    }
+
+    if (pad_type == MK_ARCADE_GPIO_CUSTOM2) {
+
+        // if the device is custom, be sure to get correct pins
+        if (gpio_cfg2.nargs < 1) {
+            pr_err("Custom device needs gpio argument\n");
+            return -EINVAL;
+        } else if(gpio_cfg2.nargs != MK_MAX_BUTTONS){
+             pr_err("Invalid gpio argument %d\n", pad_type);
+             return -EINVAL;
+        }
+
     }
 
     pr_err("pad type : %d\n",pad_type);
@@ -541,14 +609,14 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
 
     for (i = 0; i < 2; i++)
         input_set_abs_params(input_dev, ABS_X + i, -1, 1, 0, 0);
-
     if (pad_type != MK_ARCADE_MCP23017)
-    {
-	for (i = 0; i < mk_max_arcade_buttons - 4; i++)
-			__set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
-    } else { //Checking for MCP23017 so it gets 4 more buttons registered to it.
-		for (i = 0; i < mk_max_mcp_arcade_buttons - 4; i++)
-			__set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
+	{
+        for (i = 0; i < MK_MAX_BUTTONS - 4; i++)
+            __set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
+    }
+    else { //Checking for MCP23017 so it gets 4 more buttons registered to it.
+	    for (i = 0; i < mk_max_mcp_arcade_buttons - 4; i++)
+		    __set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
     }
 
     mk->pad_count[pad_type]++;
@@ -556,16 +624,19 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
     // asign gpio pins
     switch (pad_type) {
         case MK_ARCADE_GPIO:
-            memcpy(pad->gpio_maps, mk_arcade_gpio_maps, 12 *sizeof(int));
+            memcpy(pad->gpio_maps, mk_arcade_gpio_maps, MK_MAX_BUTTONS *sizeof(int));
             break;
         case MK_ARCADE_GPIO_BPLUS:
-            memcpy(pad->gpio_maps, mk_arcade_gpio_maps_bplus, 12 *sizeof(int));
+            memcpy(pad->gpio_maps, mk_arcade_gpio_maps_bplus, MK_MAX_BUTTONS *sizeof(int));
             break;
         case MK_ARCADE_GPIO_TFT:
-            memcpy(pad->gpio_maps, mk_arcade_gpio_maps_tft, 12 *sizeof(int));
+            memcpy(pad->gpio_maps, mk_arcade_gpio_maps_tft, MK_MAX_BUTTONS *sizeof(int));
             break;
         case MK_ARCADE_GPIO_CUSTOM:
-            memcpy(pad->gpio_maps, gpio_cfg.mk_arcade_gpio_maps_custom, 12 *sizeof(int));
+            memcpy(pad->gpio_maps, gpio_cfg.mk_arcade_gpio_maps_custom, MK_MAX_BUTTONS *sizeof(int));
+            break;
+        case MK_ARCADE_GPIO_CUSTOM2:
+            memcpy(pad->gpio_maps, gpio_cfg2.mk_arcade_gpio_maps_custom, MK_MAX_BUTTONS *sizeof(int));
             break;
         case MK_ARCADE_MCP23017:
             // nothing to asign if MCP23017 is used
@@ -574,20 +645,15 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
 
     // initialize gpio if not MCP23017, else initialize i2c
     if(pad_type != MK_ARCADE_MCP23017){
-        for (i = 0; i < mk_max_arcade_buttons; i++) {
-            pr_debug("GPIO = %d\n", pad->gpio_maps[i]);
+        for (i = 0; i < MK_MAX_BUTTONS; i++) {
+            printk("Set Input GPIO = %d\n", pad->gpio_maps[i]);
             if(pad->gpio_maps[i] != -1){    // to avoid unused buttons
                  setGpioAsInput(pad->gpio_maps[i]);
-            }                
-        }
-        is_2711 = *(gpio+GPIO_PUP_PDN_CNTRL_REG3) != 0x6770696f;
-        if (is_2711) {
-            set_gpio_pullups_2711(pad->gpio_maps);
-        } else {
-            setGpioPullUps(getPullUpMask(pad->gpio_maps));
-        }
-
-        pr_info("GPIO configured for pad%d\n", idx);
+                 gpio_set_pull(pad->gpio_maps[i],PULL_UP); //pull up init
+            }
+		}
+        //setGpioPullUps(getPullUpMask(pad->gpio_maps));
+        printk("GPIO configured for pad%d\n", idx);
     }else{
         i2c_init();
         udelay(1000);
@@ -635,11 +701,7 @@ static struct mk __init *mk_probe(int *pads, int n_pads) {
     }
 
     mutex_init(&mk->mutex);
-    #ifdef HAVE_TIMER_SETUP
     timer_setup(&mk->timer, mk_timer, 0);
-    #else
-    setup_timer(&mk->timer, mk_timer, (long) mk);
-    #endif
 
     for (i = 0; i < n_pads && i < MK_MAX_DEVICES; i++) {
         if (!pads[i])
@@ -681,20 +743,23 @@ static void mk_remove(struct mk *mk) {
 
 static int __init mk_init(void) {
 
+    /* Base address detection from cmitu https://github.com/cmitu/gamecon_gpio_rpi/ */
     /* Get the BCM2708 peripheral address */
-    mk_bcm2708_peri_base = mk_bcm_peri_base_probe();
-    if (!mk_bcm2708_peri_base) {
+        
+    gc_bcm2708_peri_base = gc_bcm_peri_base_probe();
+    if (!gc_bcm2708_peri_base) {
         pr_err("failed to find peripherals address base via device-tree\n");
         return -ENODEV;
     }
 
-    pr_info("peripherals address base at 0x%08x\n", mk_bcm2708_peri_base);
-
+    pr_info("peripherals address base at 0x%08x\n", gc_bcm2708_peri_base);    
+	
     /* Set up gpio pointer for direct register access */
     if ((gpio = ioremap(GPIO_BASE, 0xB0)) == NULL) {
         pr_err("io remap failed\n");
         return -EBUSY;
     }
+
     /* Set up i2c pointer for direct register access */
     if ((bsc1 = ioremap(BSC1_BASE, 0xB0)) == NULL) {
         pr_err("io remap failed\n");
